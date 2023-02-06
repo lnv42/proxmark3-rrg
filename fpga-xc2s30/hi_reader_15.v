@@ -43,8 +43,8 @@ reg after_hysteresis, after_hysteresis_prev, after_hysteresis_prev_prev;
 reg [11:0] has_been_low_for;
 always @(negedge adc_clk)
 begin
-    if (& adc_d[7:0]) after_hysteresis <= 1'b1;
-    else if (~(| adc_d[7:0])) after_hysteresis <= 1'b0;
+    if (& adc_d[7:4]) after_hysteresis <= 1'b1;
+    else if (~(| adc_d[7:6])) after_hysteresis <= 1'b0;
 
     if (after_hysteresis)
     begin

@@ -107,7 +107,7 @@
 ///////////////////////////////////////////////////////////////////////
 
 // buffers
-#define ISO15693_MAX_RESPONSE_LENGTH     36 // allows read single block with the maximum block size of 256bits. Read multiple blocks not supported yet
+#define ISO15693_MAX_RESPONSE_LENGTH     2116 // allows read multiple block with the maximum block size of 256bits and a maximum block number of 64 with REQ_OPTION (lock status for each block).
 #define ISO15693_MAX_COMMAND_LENGTH      45 // allows write single block with the maximum block size of 256bits. Write multiple blocks not supported yet
 
 // 32 + 2 crc + 1
@@ -120,6 +120,7 @@
 //#define Crc(data, len)        Crc(CRC_15693, (data), (len))
 #define CheckCrc15(data, len)   check_crc(CRC_15693, (data), (len))
 #define AddCrc15(data, len)     compute_crc(CRC_15693, (data), (len), (data)+(len), (data)+(len)+1)
+#define CalculateCrc15(data, len)  Crc16ex(CRC_15693, (data), (len) + 2);
 
 static void BuildIdentifyRequest(uint8_t *cmd);
 
@@ -1174,6 +1175,97 @@ static void DecodeReaderReset(DecodeReader_t *reader) {
     reader->state = STATE_READER_UNSYNCD;
 }
 
+/*static int RAMFUNC logRawData(bool bit,  DecodeReader_t *reader)
+{
+    switch (reader->state) {
+        case STATE_READER_UNSYNCD:
+            if (bit) {
+                reader->state = STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF;
+            }
+            break;
+
+        case STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF:
+            if (!bit) {
+                // we went low, so this could be the beginning of a SOF
+                reader->posCount = 1;
+                //reader->state = STATE_READER_AWAIT_2ND_FALLING_EDGE_OF_SOF;
+                reader->state = STATE_READER_AWAIT_1ST_RISING_EDGE_OF_SOF;
+                //LED_C_ON();
+            }
+            break;
+
+        case STATE_READER_AWAIT_1ST_RISING_EDGE_OF_SOF:
+            reader->posCount++;
+            if (bit) { // detected rising edge
+                if (reader->posCount < 4) { // rising edge too early (nominally expected at 5)
+                    //Dbprintf("pos=%d", reader->posCount);
+                    reader->state = STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF;
+                    //LED_B_ON();
+                } else { // SOF
+                    reader->state = STATE_READER_AWAIT_2ND_FALLING_EDGE_OF_SOF;
+                    reader->byteCount = 0;
+                    reader->posCount = 0;
+                }
+            } else {
+                if (reader->posCount > 6) { // stayed low for too long
+                    //Dbprintf("pos=%d", reader->posCount);
+                    DecodeReaderReset(reader);
+                    //LED_C_ON();
+                } else {
+                    // do nothing, keep waiting
+                }
+            }
+            break;
+        case STATE_READER_AWAIT_2ND_FALLING_EDGE_OF_SOF:
+            
+            //reader->posCount++;
+            LED_B_ON();
+
+            reader->bitCount++;
+            reader->shiftReg <<= 1;
+            reader->shiftReg += bit;
+            if (reader->bitCount == 8) {
+                reader->output[reader->byteCount++] = reader->shiftReg;
+                reader->bitCount = 0;
+                if (reader->byteCount > 8)
+                {
+                    if (reader->shiftReg == 0xff)
+                    {
+                        reader->posCount++;
+                        if (reader->posCount > 8)
+                        {
+                            LED_B_OFF();
+                            DecodeReaderReset(reader);
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        reader->posCount = 0;
+                        if (reader->output[reader->byteCount-1] == 0)
+                        {
+                            if (reader->output[reader->byteCount-2] == 0)
+                            {
+                                LED_B_OFF();
+                                DecodeReaderReset(reader);
+                                return true;
+                            }
+                        }
+                    }
+                }
+                if (reader->byteCount > reader->byteCountMax) {
+                    LED_B_OFF();
+                    DecodeReaderReset(reader);
+                    return true;
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    return false;
+}
+*/
 //static inline __attribute__((always_inline))
 static int RAMFUNC Handle15693SampleFromReader(bool bit, DecodeReader_t *reader) {
     switch (reader->state) {
@@ -1193,42 +1285,39 @@ static int RAMFUNC Handle15693SampleFromReader(bool bit, DecodeReader_t *reader)
             break;
 
         case STATE_READER_AWAIT_1ST_RISING_EDGE_OF_SOF:
-            reader->posCount++;
             if (bit) { // detected rising edge
-                if (reader->posCount < 4) { // rising edge too early (nominally expected at 5)
+                if (reader->posCount < 2) { // rising edge too early (nominally expected at 4)
                     reader->state = STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF;
                 } else { // SOF
                     reader->state = STATE_READER_AWAIT_2ND_FALLING_EDGE_OF_SOF;
+                    reader->posCount = 1;
                 }
             } else {
-                if (reader->posCount > 5) { // stayed low for too long
+                reader->posCount++;
+                if (reader->posCount > 6) { // stayed low for too long
                     DecodeReaderReset(reader);
-                } else {
-                    // do nothing, keep waiting
                 }
             }
             break;
 
         case STATE_READER_AWAIT_2ND_FALLING_EDGE_OF_SOF:
-
-            reader->posCount++;
-
-            if (bit == false) { // detected a falling edge
-
-                if (reader->posCount < 20) {         // falling edge too early (nominally expected at 21 earliest)
+            if (!bit) { // detected a falling edge
+                if (reader->posCount < 14) {         // falling edge too early (nominally expected at 16 earliest)
                     DecodeReaderReset(reader);
-                } else if (reader->posCount < 23) {  // SOF for 1 out of 4 coding
+                } else if (reader->posCount <= 18) {  // SOF for 1 out of 4 coding
                     reader->Coding = CODING_1_OUT_OF_4;
                     reader->state = STATE_READER_AWAIT_2ND_RISING_EDGE_OF_SOF;
-                } else if (reader->posCount < 28) {  // falling edge too early (nominally expected at 29 latest)
+                    reader->posCount = 1;
+                } else if (reader->posCount < 22) {  // falling edge too early (nominally expected at 24 latest)
                     DecodeReaderReset(reader);
-                } else {                                   // SOF for 1 out of 256 coding
+                } else {                             // SOF for 1 out of 256 coding
                     reader->Coding = CODING_1_OUT_OF_256;
                     reader->state = STATE_READER_AWAIT_2ND_RISING_EDGE_OF_SOF;
+                    reader->posCount = 1;
                 }
-
             } else {
-                if (reader->posCount > 29) { // stayed high for too long
+                reader->posCount++;
+                if (reader->posCount > 26) { // stayed high for too long
                     reader->state = STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF;
                 } else {
                     // do nothing, keep waiting
@@ -1237,60 +1326,42 @@ static int RAMFUNC Handle15693SampleFromReader(bool bit, DecodeReader_t *reader)
             break;
 
         case STATE_READER_AWAIT_2ND_RISING_EDGE_OF_SOF:
-
-            reader->posCount++;
-
             if (bit) { // detected rising edge
-                if (reader->Coding == CODING_1_OUT_OF_256) {
-                    if (reader->posCount < 32) { // rising edge too early (nominally expected at 33)
-                        reader->state = STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF;
-                    } else {
-                        reader->posCount = 1;
-                        reader->bitCount = 0;
+                if (reader->posCount < 2) { // rising edge too early (nominally expected at 8)
+                    reader->state = STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF;
+                } else {
+                    reader->posCount = 1;
+                    if (reader->Coding == CODING_1_OUT_OF_256) {
+                        reader->bitCount = 1;
                         reader->byteCount = 0;
                         reader->sum1 = 1;
-                        reader->state = STATE_READER_RECEIVE_DATA_1_OUT_OF_256;
                         LED_B_ON();
-                    }
-                } else { // CODING_1_OUT_OF_4
-                    if (reader->posCount < 24) { // rising edge too early (nominally expected at 25)
-                        reader->state = STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF;
-                    } else {
-                        reader->posCount = 1;
+                        reader->state = STATE_READER_RECEIVE_DATA_1_OUT_OF_256;
+                    } else { // CODING_1_OUT_OF_4
                         reader->state = STATE_READER_AWAIT_END_OF_SOF_1_OUT_OF_4;
                     }
                 }
             } else {
-                if (reader->Coding == CODING_1_OUT_OF_256) {
-                    if (reader->posCount > 34) { // signal stayed low for too long
-                        DecodeReaderReset(reader);
-                    } else {
-                        // do nothing, keep waiting
-                    }
-                } else { // CODING_1_OUT_OF_4
-                    if (reader->posCount > 26) { // signal stayed low for too long
-                        DecodeReaderReset(reader);
-                    } else {
-                        // do nothing, keep waiting
-                    }
+                reader->posCount++;
+                if (reader->posCount > 6) { // signal stayed low for too long
+                    DecodeReaderReset(reader);
+                } else {
+                    // do nothing, keep waiting
                 }
             }
             break;
 
         case STATE_READER_AWAIT_END_OF_SOF_1_OUT_OF_4:
-
-            reader->posCount++;
-
             if (bit) {
-                if (reader->posCount == 9) {
-                    reader->posCount = 1;
+                reader->posCount++;
+
+                if (reader->posCount == 8) {
+                    reader->posCount = 0;
                     reader->bitCount = 0;
                     reader->byteCount = 0;
-                    reader->sum1 = 1;
+                    reader->sum1 = 0;
                     reader->state = STATE_READER_RECEIVE_DATA_1_OUT_OF_4;
                     LED_B_ON();
-                } else {
-                    // do nothing, keep waiting
                 }
             } else { // unexpected falling edge
                 DecodeReaderReset(reader);
@@ -1298,62 +1369,103 @@ static int RAMFUNC Handle15693SampleFromReader(bool bit, DecodeReader_t *reader)
             break;
 
         case STATE_READER_RECEIVE_DATA_1_OUT_OF_4:
+            if (!bit) {
+                reader->sum1++;
+                if (reader->sum1 == 1) { // first low bit
+                    if (reader->posCount <= 6) { // bits : 00
+                        reader->shiftReg >>= 2;
+                        //reader->shiftReg |= (0 << 6);
+                        reader->bitCount += 2;
+                        reader->posCount = -28;
+                    } else if (reader->posCount <= 9) { // EOF
+                        LED_B_OFF(); // Finished receiving
+                        DecodeReaderReset(reader);
+                        if (reader->byteCount > 0) {
+                            return true;
+                        }
+                    } else if (reader->posCount <= 14) { // bits : 01
+                        reader->shiftReg >>= 2;
+                        reader->shiftReg |= (1 << 6);
+                        reader->bitCount += 2;
+                        reader->posCount = -20;
+                    } else if (reader->posCount < 18) { // unexpected falling edge
+                        DecodeReaderReset(reader);
+                        if (reader->byteCount >= 0) {
+                            reader->output[reader->byteCount++] = reader->posCount;
+                            reader->output[reader->byteCount++] = reader->bitCount;
+                            reader->output[reader->byteCount++] = 0x42;
+                            return true;
+                        }
+                    } else if (reader->posCount <= 22) { // bits : 10
+                        reader->shiftReg >>= 2;
+                        reader->shiftReg |= (2 << 6);
+                        reader->bitCount += 2;
+                        reader->posCount = -12;
+                    } else if (reader->posCount < 26) { // unexpected falling edge
+                        DecodeReaderReset(reader);
+                        if (reader->byteCount >= 0) {
+                            reader->output[reader->byteCount++] = reader->posCount;
+                            reader->output[reader->byteCount++] = reader->bitCount;
+                            reader->output[reader->byteCount++] = 0x43;
+                            return true;
+                        }
+                    } else { // bits : 11
+                        reader->shiftReg >>= 2;
+                        reader->shiftReg |= (3 << 6);
+                        reader->bitCount += 2;
+                        reader->posCount = -4;
+                    }
 
-            reader->posCount++;
+                    if (reader->bitCount == 8)
+                    {
+                        reader->output[reader->byteCount++] = reader->shiftReg;
+                        if (reader->byteCount > reader->byteCountMax) {
+                            // buffer overflow, give up
+                            LED_B_OFF();
+                            DecodeReaderReset(reader);
+                        }
 
-            if (reader->posCount == 1) {
-
-                reader->sum1 = bit ? 1 : 0;
-
-            } else if (reader->posCount <= 4) {
-
-                if (bit)
-                    reader->sum1++;
-
-            } else if (reader->posCount == 5) {
-
-                reader->sum2 = bit ? 1 : 0;
-
-            } else {
-                if (bit)
-                    reader->sum2++;
-            }
-
-            if (reader->posCount == 8) {
-                reader->posCount = 0;
-                if (reader->sum1 <= 1 && reader->sum2 >= 3) { // EOF
-                    LED_B_OFF(); // Finished receiving
+                        reader->bitCount = 0;
+                        reader->shiftReg = 0;
+                        /*if (reader->byteCount == reader->jam_search_len) {
+                          if (!memcmp(reader->output, reader->jam_search_string, reader->jam_search_len)) {
+                          LED_D_ON();
+                          FpgaWriteConfWord(FPGA_MAJOR_MODE_HF_READER | FPGA_HF_READER_MODE_SEND_JAM);
+                          reader->state = STATE_READER_RECEIVE_JAMMING;
+                          }
+                          }*/
+                    }
+                } else if (reader->sum1 > 6) { // too long low bit
                     DecodeReaderReset(reader);
-                    if (reader->byteCount != 0) {
+                    if (reader->byteCount >= 0) {
+                        reader->output[reader->byteCount++] = reader->posCount;
+                        reader->output[reader->byteCount++] = reader->bitCount;
+                        reader->output[reader->byteCount++] = 0x44;
                         return true;
                     }
-
-                } else if (reader->sum1 >= 3 && reader->sum2 <= 1) { // detected a 2bit position
-                    reader->shiftReg >>= 2;
-                    reader->shiftReg |= (reader->bitCount << 6);
                 }
-
-                if (reader->bitCount == 15) { // we have a full byte
-
-                    reader->output[reader->byteCount++] = reader->shiftReg;
-                    if (reader->byteCount > reader->byteCountMax) {
-                        // buffer overflow, give up
-                        LED_B_OFF();
-                        DecodeReaderReset(reader);
+            } else {
+                reader->posCount++;
+                if (reader->posCount > 30) {
+                    reader->state = STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF;
+                    if (reader->byteCount >= 0) {
+                        reader->output[reader->byteCount++] = reader->posCount;
+                        reader->output[reader->byteCount++] = reader->bitCount;
+                        reader->output[reader->byteCount++] = 0x45;
+                        return true;
                     }
-
-                    reader->bitCount = 0;
-                    reader->shiftReg = 0;
-                    if (reader->byteCount == reader->jam_search_len) {
-                        if (!memcmp(reader->output, reader->jam_search_string, reader->jam_search_len)) {
-                            LED_D_ON();
-                            FpgaWriteConfWord(FPGA_MAJOR_MODE_HF_READER | FPGA_HF_READER_MODE_SEND_JAM);
-                            reader->state = STATE_READER_RECEIVE_JAMMING;
-                        }
+                }
+                if (reader->sum1 == 1) {
+                    reader->state = STATE_READER_AWAIT_1ST_FALLING_EDGE_OF_SOF;
+                    if (reader->byteCount >= 0) {
+                        reader->output[reader->byteCount++] = reader->posCount;
+                        reader->output[reader->byteCount++] = reader->bitCount;
+                        reader->output[reader->byteCount++] = 0x46;
+                        return true;
                     }
-
-                } else {
-                    reader->bitCount++;
+                } else if (reader->sum1 > 1) {
+                    reader->posCount += reader->sum1;
+                    reader->sum1 = 0;
                 }
             }
             break;
@@ -1702,6 +1814,28 @@ void SniffIso15693(uint8_t jam_search_len, uint8_t *jam_search_string, bool icla
                 }
             }
         }
+
+        /*if (logRawData((sniffdata & 0x02) >> 1, &dreader))
+        {
+            uint32_t eof_time = dma_start_time + (samples * 16) + 8 - DELAY_READER_TO_ARM_SNIFF; // end of EOF
+                if (dreader.byteCount > 0) {
+                    uint32_t sof_time = eof_time+42;
+                    tracesize += dreader.byteCount;
+                    if (tracesize < 32*1024)
+                        LogTrace_ISO15693(dreader.output, dreader.byteCount, (sof_time * 4), (eof_time * 4), NULL, true);
+                }
+        }
+        if (logRawData(sniffdata & 0x01, &dreader))
+        {
+            uint32_t eof_time = dma_start_time + (samples * 16) + 8 - DELAY_READER_TO_ARM_SNIFF; // end of EOF
+                if (dreader.byteCount > 0) {
+                    uint32_t sof_time = eof_time+42;
+                    tracesize += dreader.byteCount;
+                    if (tracesize < 32*1024)
+                        LogTrace_ISO15693(dreader.output, dreader.byteCount, (sof_time * 4), (eof_time * 4), NULL, true);
+                }
+        }
+        continue;*/
 
         // no need to try decoding reader data if the tag is sending
         if (!tag_is_active) {
